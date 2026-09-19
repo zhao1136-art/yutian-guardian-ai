@@ -1,0 +1,28 @@
+# —— 敏感 / 本地数据：绝不入库 ——
+monitor_data/
+*.pth
+*.npz
+
+# —— 样本与训练源数据（含原始下载 zip，含大量真实恶意样本）——
+samples/malware/*
+samples/benign/*
+training_samples/
+image_cache/
+
+# —— Python 缓存 ——
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+env/
+
+# —— 内嵌工具仓库 / 安装包：不随项目发布 ——
+内存分析/ncyh/
+内存分析/downloads-gh-cli.zip
+
+# —— 临时 / 系统 ——
+*.log
+.DS_Store
+Thumbs.db
+temp/
+*.tmp
