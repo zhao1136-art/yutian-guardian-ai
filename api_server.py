@@ -22,11 +22,12 @@ import time
 import secrets
 import traceback
 import mimetypes
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import (API_HOST, API_PORT, API_MAX_UPLOAD, MONITOR_DIR,
-                    MODEL_PATH, IMG_SIZE)
+                    MODEL_PATH, IMG_SIZE, STATIC_WEB)
 
 # ---------- token 管理 ----------
 TOKEN_FILE = os.path.join(MONITOR_DIR, "api_token.txt")
@@ -81,8 +82,40 @@ def _json(data, handler, status=200):
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def _send_static(handler, path, status=200):
+    """发送静态文件（带 CORS 头）。path 为磁盘绝对路径。"""
+    ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    with open(path, "rb") as f:
+        body = f.read()
+    handler.send_response(status)
+    handler.send_header("Content-Type", ctype)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _resolve_static(rel_path):
+    """把 URL 相对路径映射到 STATIC_WEB 下磁盘文件；不存在则回退 index.html。"""
+    if not STATIC_WEB or not os.path.isdir(STATIC_WEB):
+        return None
+    rel = urllib.parse.unquote(rel_path).lstrip("/")
+    if not rel or rel.endswith("/"):
+        rel = "index.html"
+    candidate = os.path.normpath(os.path.join(STATIC_WEB, rel))
+    # 防目录穿越
+    if not os.path.abspath(candidate).startswith(os.path.abspath(STATIC_WEB)):
+        return None
+    if os.path.isfile(candidate):
+        return candidate
+    index = os.path.join(STATIC_WEB, "index.html")
+    return index if os.path.isfile(index) else None
 
 
 def _monitor_payload():
@@ -103,9 +136,10 @@ def _monitor_payload():
             "risk_score": total,
             "monitor_verdict": baseline.verdict_from_score(total),
         }
-    except Exception:
+    except Exception as exc:
         return {"findings": [], "risk_score": 0,
-                "monitor_verdict": "未就绪", "error": "监控采集异常"}
+                "monitor_verdict": "未就绪", "error": "监控采集异常",
+                "detail": repr(exc)}
 
 
 class GuardianHandler(BaseHTTPRequestHandler):
@@ -127,19 +161,37 @@ class GuardianHandler(BaseHTTPRequestHandler):
         return True
 
     # ---- 路由 ----
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self):
-        if self.path.split("?")[0] == "/health":
+        path = self.path.split("?")[0]
+        if path == "/health":
             self._health()
-        elif self.path.split("?")[0] == "/monitor":
+        elif path == "/monitor":
             if self._authed():
                 self._monitor()
         else:
-            _json({"error": "未找到接口", "code": "not_found"}, self, status=404)
+            # 非 API 路径：托管前端控制台静态资源（SPA 回退）
+            static = _resolve_static(path)
+            if static is None:
+                _json({"error": "未找到接口", "code": "not_found"}, self, status=404)
+            else:
+                _send_static(self, static)
 
     def do_POST(self):
-        if self.path.split("?")[0] == "/predict":
+        path = self.path.split("?")[0]
+        if path == "/predict":
             if self._authed():
                 self._predict()
+        elif path == "/explain":
+            if self._authed():
+                self._explain()
         else:
             _json({"error": "未找到接口", "code": "not_found"}, self, status=404)
 
@@ -221,6 +273,34 @@ class GuardianHandler(BaseHTTPRequestHandler):
             "monitor": mon,
         }, self)
 
+    def _explain(self):
+        """POST /explain — 自研本地解释引擎：根据检测结果生成结论/依据/建议，或回答追问。
+        请求 JSON: {message?, detection_context?}  （均为可选；message 为空时返回完整分析）"""
+        try:
+            from ai_explainer import explain
+        except Exception:
+            _json({"error": "解释引擎加载失败", "code": "explainer_fail"}, self,
+                  status=503)
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0 or length > API_MAX_UPLOAD:
+            _json({"error": "请求体为空或超出大小上限", "code": "bad_length"}, self,
+                  status=400)
+            return
+        try:
+            raw = self.rfile.read(length).decode("utf-8", "ignore")
+            payload = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            _json({"error": "请求体不是合法 JSON", "code": "bad_json"}, self,
+                  status=400)
+            return
+        message = payload.get("message")
+        detection = payload.get("detection_context") or {}
+        if not detection:
+            detection = {"fused_state": "未知", "probabilities": {},
+                         "monitor": {"risk_score": 0, "findings": []}}
+        _json(explain(detection, message), self)
+
     def _read_multipart(self, length):
         """粗解析 multipart/form-data，返回第一个 file 字段的二进制内容。"""
         raw = self.rfile.read(length)
@@ -259,6 +339,9 @@ def main():
     print("  GET  /health    健康检查(无需鉴权)")
     print("  GET  /monitor   监控结果(需 Bearer token)")
     print("  POST /predict   文件融合判定(需 Bearer token)")
+    print("  POST /explain   自研本地解释引擎(需 Bearer token)")
+    if os.path.isdir(STATIC_WEB):
+        print(f"  控制台    /   (托管控件: {STATIC_WEB})")
 
     server = ThreadingHTTPServer((args.host, args.port), GuardianHandler)
     print(f"\n服务已启动，按 Ctrl+C 停止。")

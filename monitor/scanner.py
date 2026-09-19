@@ -118,6 +118,8 @@ def list_scheduled_tasks():
                              capture_output=True, text=True, timeout=20).stdout
     except Exception:
         return tasks
+    if not out:
+        return tasks
     for ln in out.splitlines():
         # 格式: 任务名,下次运行时间,模式,状态  —— 只取首列(名)和末列(状态)
         parts = ln.split(",")

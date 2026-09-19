@@ -81,6 +81,8 @@ API_HOST = "0.0.0.0"
 API_PORT = 8567
 # API 鉴权 token：为空则自动生成并存 monitor_data/api_token.txt；可被环境变量 GUARDIAN_API_TOKEN 覆盖
 API_MAX_UPLOAD = 10 * 1024 * 1024
+# 前端控制台静态产物目录（React 构建输出，由本服务同端口托管）
+STATIC_WEB = os.path.join(BASE_DIR, "static_web")
 
 # ============ 敏感区域监控模块 ============
 MONITOR_DIR = os.path.join(BASE_DIR, "monitor_data")

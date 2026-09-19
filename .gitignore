@@ -20,6 +20,14 @@ env/
 内存分析/ncyh/
 内存分析/downloads-gh-cli.zip
 
+# —— 前端构建产物 / 依赖 ——
+static_web/
+web_console/node_modules/
+web_console/dist/
+
+# —— 开发工具目录 ——
+.trae/
+
 # —— 临时 / 系统 ——
 *.log
 .DS_Store

@@ -43,6 +43,8 @@ def query_events(since_minutes=EVENT_LOOKBACK_MINUTES):
 def _parse(text):
     """从 wevtutil 文本输出里粗略提取事件ID+描述"""
     results = []
+    if not text:
+        return results
     cur_id = None
     buf = []
     for ln in text.splitlines():

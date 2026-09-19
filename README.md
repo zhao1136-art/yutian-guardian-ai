@@ -9,6 +9,7 @@
 - **OOD 未知检测**：识别训练分布之外的陌生样本（未见过的恶意程序变种），避免硬分类误判。
 - **敏感区域监控**：注册表自启动、启动文件夹、计划任务、载荷高发目录、进程/内存采样等规则联动。
 - **公共 API**：`/health`、`/monitor`、`/predict`，Bearer token 鉴权，局域网可用。
+- **前端控制台 + 自研 AI 对话**：浏览器控制台（上传检测、四态卡片、监控面板），以及**离线可解释的 AI 助手**（本地规则引擎，无需联网/无外部大模型）。
 
 ## 目录结构
 
@@ -84,12 +85,14 @@ F:\Python314\python.exe seal_samples.py --target G:/御天防护型AI/样本封�
 
 ## 公共 API
 
-启动：
+启动（同端口托管前端控制台）：
 
 ```
 F:\Python314\python.exe api_server.py            # 默认 0.0.0.0:8567
 F:\Python314\python.exe api_server.py --port 9000
 ```
+
+浏览器打开 `http://127.0.0.1:8567/` 即进入**前端控制台**（需先构建前端，见下）。
 
 ### 鉴权 token
 
@@ -117,6 +120,31 @@ curl http://127.0.0.1:8567/predict \
 ```
 
 返回 `label / confidence / probabilities / fused_state / monitor`，其中 `fused_state` 即四态判定结果。
+
+### POST /explain —— 自研本地解释引擎（AI 对话）
+
+无需大模型、纯离线。传入可选的 `message`（用户问题）与 `detection_context`（最近一次 `predict` 的返回），返回自然语言结论/依据/处置建议。
+
+```bash
+curl http://127.0.0.1:8567/explain \
+     -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+     -d '{"message":"为什么这么判定","detection_context":{"fused_state":"恶意","probabilities":{"benign":0.03,"malware":0.97},"monitor":{"risk_score":0,"findings":[]}}}'
+```
+
+- `message` 缺省时返回完整结构化分析（`summary / rationale / evidence / advice / severity / score_hint`）。
+- `message` 通过关键字意图识别回答常见追问（为什么/依据/怎么办/风险/结论等）。
+
+## 前端控制台（构建）
+
+```powershell
+# 已装 Node 到 F:\nodejs\node-v24.21.0-win-x64
+$node = "F:\nodejs\node-v24.21.0-win-x64"; $env:PATH = "$node;$env:PATH"
+Set-Location F:\御天防护型AI\web_console
+npm install
+npm run build        # 产物输出到 ../static_web，由 api_server 同端口托管
+```
+
+开发模式：`npm run dev`（vite:5173）会把 `/health /predict /monitor /explain` 代理到后端 8567，需先启动 `api_server.py`。
 
 ## 说明
 
