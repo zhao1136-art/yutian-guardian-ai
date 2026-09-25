@@ -7,9 +7,12 @@
 - **Malware-to-Image 方法**：把 PE（.exe/.dll/.sys/.scr/.com）二进制按字节映射为 64×64 灰度图，交给轻量 CNN 分类。
 - **四态融合判定**：综合静态模型与系统监控结果，输出 `良性 / 可疑待审 / 恶意 / 未知` 四种状态。
 - **OOD 未知检测**：识别训练分布之外的陌生样本（未见过的恶意程序变种），避免硬分类误判。
+- **特征签名库**：MD5 哈希特征库 + 字节签名库（银狐家族等），`sigscan.py` 命中即恶意。
 - **敏感区域监控**：注册表自启动、启动文件夹、计划任务、载荷高发目录、进程/内存采样等规则联动。
-- **公共 API**：`/health`、`/monitor`、`/predict`，Bearer token 鉴权，局域网可用。
-- **前端控制台 + 自研 AI 对话**：浏览器控制台（上传检测、四态卡片、监控面板），以及**离线可解释的 AI 助手**（本地规则引擎，无需联网/无外部大模型）。
+- **公共 API**：`/health`、`/monitor`、`/predict`、`/explain`，Bearer token 鉴权，局域网可用。
+- **前端可视化控制台**：纯 SVG 自绘（无第三方图表库）——风险仪表盘、嵌入空间散点图（PCA 2D）、信号强度面板、监控风险分布图，让检测情况"直观可见"。
+- **AI 对话（四按钮）**：自研本地解释引擎（无外部大模型、纯离线），点击「结论摘要 / 判定依据 / 处置建议 / 风险程度」直接展示对应结论与答案，并附**相似样本依据**（知识库最近邻）。
+- **自动鉴权**：前端打开控制台自动注入 token，无需手动输入；外部 API 调用仍须 `Bearer` 头。
 
 ## 目录结构
 
@@ -19,12 +22,17 @@
 ├── config.py               # 全局配置（路径/超参/OOD 阈值/API 端口/监控规则）
 ├── guardian.py             # 四态融合判定
 ├── infer.py                # 推理与批量扫描
+├── sigscan.py              # 特征签名检测（MD5 库 + 字节签名库）
+├── viz_pca.py              # 256 维嵌入 → PCA 2D 投影（前端散点图）
 ├── seal_samples.py         # 样本 AES-256 加密封存脚本
 ├── train.py                # 训练脚本（类别加权的 CrossEntropy + LR 调度）
+├── extract_training_zip.py # 解压原始样本 zip（加密包）→ 提取 PE
+├── collect_benign.py       # 从 System32 收集良性样本
 ├── data/                   # 二进制→灰度图、数据集加载
-├── models/                 # cnn.py（模型）、ood.py（未知样本机制）
+├── models/                 # cnn.py（模型）、ood.py（未知样本机制）、knowledge.py（特征知识库）
 ├── monitor/                # baseline / events / processmem / scanner 监控模块
-├── checkpoints/            # 训练产物：guardian_cnn_v1.pth、ood_stats.npz
+├── web_console/            # 前端控制台（React/Vite，src/components 含 Viz.jsx 可视化组件）
+├── checkpoints/            # 训练产物：guardian_cnn_v1.pth、ood_stats.npz、knowledge.*
 ├── samples/                # 明文样本目录（训练后建议封存清空）
 ├── training_samples/       # 原始下载的带日志 zip 样本包
 └── monitor_data/           # 本地敏感数据（token、封存密码、基线），勿提交到仓库
@@ -97,7 +105,8 @@ F:\Python314\python.exe api_server.py --port 9000
 ### 鉴权 token
 
 - token 存于 `monitor_data/api_token.txt`，可通过环境变量 `GUARDIAN_API_TOKEN` 覆盖。
-- 除 `/health` 外，一律要求请求头 `Authorization: Bearer <token>`。
+- **前端控制台自动鉴权**：`api_server` 托管页面时自动把 token 注入 localStorage，打开即登录，无需手动输入。
+- 外部 API 调用一律要求请求头 `Authorization: Bearer <token>`（`/health` 除外）。
 
 ### GET /health —— 健康检查（无鉴权）
 
@@ -119,11 +128,15 @@ curl http://127.0.0.1:8567/predict \
      -F "file=@C:/path/to/your_file.exe"
 ```
 
-返回 `label / confidence / probabilities / fused_state / monitor`，其中 `fused_state` 即四态判定结果。
+- 上传上限 **200MB**（真实加壳/打包样本常超 10MB）。
+- 返回 `label / confidence / probabilities / fused_state / monitor / viz`：
+  - `fused_state` 即四态判定结果；
+  - `viz` 为 PCA 2D 投影坐标与良/恶意历史样本簇点，供前端散点图渲染；
+  - `embedding`（256 维）供 `/explain` 做知识库最近邻检索。
 
 ### POST /explain —— 自研本地解释引擎（AI 对话）
 
-无需大模型、纯离线。传入可选的 `message`（用户问题）与 `detection_context`（最近一次 `predict` 的返回），返回自然语言结论/依据/处置建议。
+无需大模型、纯离线。前端提供四个固定问题按钮，点击即展示对应答案：**结论摘要 / 判定依据 / 处置建议 / 风险程度**。接口也可直接调用：
 
 ```bash
 curl http://127.0.0.1:8567/explain \
@@ -133,6 +146,7 @@ curl http://127.0.0.1:8567/explain \
 
 - `message` 缺省时返回完整结构化分析（`summary / rationale / evidence / advice / severity / score_hint`）。
 - `message` 通过关键字意图识别回答常见追问（为什么/依据/怎么办/风险/结论等）。
+- 返回附 `top_matches`：检测嵌入在特征知识库中的最近邻历史样本（相似度 + 类标），作为"相似样本依据"。
 
 ## 前端控制台（构建）
 
@@ -145,6 +159,12 @@ npm run build        # 产物输出到 ../static_web，由 api_server 同端口�
 ```
 
 开发模式：`npm run dev`（vite:5173）会把 `/health /predict /monitor /explain` 代理到后端 8567，需先启动 `api_server.py`。
+
+### 控制台可视化（纯 SVG 自绘，无第三方图表库）
+
+- **样本检测页**：风险仪表盘（指针按融合判定定级）、恶意/良性概率对比条、嵌入空间散点图（本样本 × 良/恶意簇）、信号强度面板（CNN / 签名 / 监控三信号）。
+- **系统监控页**：风险分仪表盘 + 风险来源按规则分组分布条 + 明细列表。
+- **AI 对话页**：四个结论按钮 + 答案卡片 + 相似样本依据标签。
 
 ## 说明
 

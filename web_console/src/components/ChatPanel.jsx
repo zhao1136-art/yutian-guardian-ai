@@ -1,24 +1,30 @@
 import React, { useState } from 'react'
 import { explain } from '../api.js'
 
-const QUICK = ['为什么这么判定', '有哪些依据', '我该怎么办', '风险高吗']
+// 四个固定维度按钮：点击即显示对应结论/答案，无需自由输入
+const BUTTONS = [
+  { label: '结论摘要', q: '结论是什么' },
+  { label: '判定依据', q: '有哪些依据' },
+  { label: '处置建议', q: '我该怎么办' },
+  { label: '风险程度', q: '风险高吗' },
+]
 
 export default function ChatPanel({ lastDetection, onOpenDetect }) {
-  const [msgs, setMsgs] = useState([]) // {role:'user'|'ai', text, planBytes}
-  const [input, setInput] = useState('')
+  const [answers, setAnswers] = useState([]) // {q, reply, matches}
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
-  const send = async (raw) => {
-    const q = (raw ?? input).trim()
-    if (!q || busy) return
-    setInput(''); setErr('')
-    setMsgs((m) => [...m, { role: 'user', text: q }])
+  const ask = async (q) => {
+    if (busy) return
+    setErr('')
     setBusy(true)
     try {
-      const det = lastDetection || null
-      const r = await explain(q, det)
-      setMsgs((m) => [...m, { role: 'ai', text: r.reply || '' }])
+      const r = await explain(q, lastDetection || null)
+      setAnswers((a) => [...a, {
+        q,
+        reply: r.reply || '',
+        matches: r.top_matches || (r.analysis && r.analysis.top_matches) || [],
+      }])
     } catch (e) {
       setErr(e.message || '解释引擎请求失败')
     } finally {
@@ -26,12 +32,10 @@ export default function ChatPanel({ lastDetection, onOpenDetect }) {
     }
   }
 
-  const onKey = (e) => { if (e.key === 'Enter' && !e.shiftKey) send() }
-
   return (
     <section className="panel chat">
       <div className="panel-head">
-        <h2>AI 对话 <span className="sub">（自研本地解释引擎，离线）</span></h2>
+        <h2>AI 对话 <span className="sub">（点击按钮查看对应结论，自研本地引擎）</span></h2>
       </div>
 
       <div className="ctx-bar">
@@ -44,45 +48,47 @@ export default function ChatPanel({ lastDetection, onOpenDetect }) {
         ) : (
           <>
             <span className="dot" />
-            尚未有检测上下文，可直接提问或先上传样本。
+            尚未有检测上下文，请先上传样本检测。
             <button className="ghost small" onClick={onOpenDetect}>去检测</button>
           </>
         )}
       </div>
 
+      <div className="quick-row">
+        {BUTTONS.map((b) => (
+          <button key={b.q} className="ghost small" onClick={() => ask(b.q)} disabled={busy}>
+            {b.label}
+          </button>
+        ))}
+      </div>
+
       <div className="msg-list">
-        {msgs.length === 0 && (
-          <p className="hint center">基于最近一次检测结果，点击下方问题或输入文本，我会给出解释与建议。</p>
+        {answers.length === 0 && (
+          <p className="hint center">上传样本完成检测后，点击上方按钮查看结论摘要 / 判定依据 / 处置建议 / 风险程度。</p>
         )}
-        {msgs.map((m, i) => (
-          <div key={i} className={`msg ${m.role}`}>
-            <div className="bubble">{m.text}</div>
+        {answers.map((a, i) => (
+          <div key={i} className="msg ai">
+            <div className="bubble">
+              <div className="answer-q">{a.q}</div>
+              <div>{a.reply}</div>
+              {a.matches.length > 0 && (
+                <div className="answer-matches">
+                  <span className="am-title">相似样本依据：</span>
+                  {a.matches.slice(0, 4).map((m, j) => (
+                    <span className="match-chip" key={j}
+                      style={{ background: m.label_name === '恶意' ? '#e5484d' : '#30a46c' }}>
+                      {m.label_name} {Math.round(m.score * 100)}%
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         ))}
         {busy && <div className="msg ai"><div className="bubble typing">正在分析…</div></div>}
       </div>
 
-      <div className="quick-row">
-        {QUICK.map((q) => (
-          <button key={q} className="ghost small" onClick={() => send(q)} disabled={busy}>
-            {q}
-          </button>
-        ))}
-      </div>
-
       {err && <p className="error">{err}</p>}
-
-      <textarea
-        className="chat-input"
-        placeholder="输入问题（如：这个结论可靠吗？）"
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={onKey}
-        rows={2}
-      />
-      <button className="primary" onClick={() => send()} disabled={busy}>
-        {busy ? '分析中…' : '发送'}
-      </button>
     </section>
   )
 }

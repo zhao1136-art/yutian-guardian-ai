@@ -91,10 +91,22 @@ def _json(data, handler, status=200):
 
 
 def _send_static(handler, path, status=200):
-    """发送静态文件（带 CORS 头）。path 为磁盘绝对路径。"""
+    """发送静态文件（带 CORS 头）。path 为磁盘绝对路径。
+    托管 index.html 时自动注入鉴权 token 脚本，前端无需手动输入。"""
     ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
     with open(path, "rb") as f:
         body = f.read()
+    if path.endswith("index.html"):
+        tok = resolve_token()
+        script = ("<script>"
+                  "(function(){try{localStorage.setItem('guardian_token',%s)"
+                  "}catch(e){}})()"
+                  "</script>") % (json.dumps(tok),)
+        marker = b"</head>"
+        if marker in body:
+            body = body.replace(marker, (script + "</head>").encode("utf-8"), 1)
+        else:
+            body = body + script.encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", ctype)
     handler.send_header("Content-Length", str(len(body)))
@@ -226,8 +238,12 @@ class GuardianHandler(BaseHTTPRequestHandler):
         # 读取上传的 file 字段
         length = int(self.headers.get("Content-Length", 0))
         if length <= 0 or length > API_MAX_UPLOAD:
-            _json({"error": "请求体为空或超出大小上限", "code": "bad_length"},
-                  self, status=400)
+            # 拒绝超大/空请求：先标记关闭连接，避免请求体未读完时
+            # 连接被重置（代理层表现为浏览器 "Failed to fetch"）
+            self.close_connection = True
+            _json({"error": "请求体为空或超出大小上限（%dMB）"
+                   % (API_MAX_UPLOAD // (1024 * 1024)),
+                   "code": "bad_length"}, self, status=400)
             return
         try:
             content_type = self.headers.get("Content-Type", "")
@@ -270,10 +286,24 @@ class GuardianHandler(BaseHTTPRequestHandler):
         except Exception:
             emb_vec = None
 
+        # 特征签名检测（MD5 哈希库 + 字节签名库）
+        from sigscan import scan as sig_scan
+        sig = sig_scan(data)
+
         # 监控融合
         mon = _monitor_payload()
         from guardian import fuse
         fused = fuse(mon["monitor_verdict"], label)
+        if sig.get("malicious"):
+            fused = "恶意"  # 强信号(特征签名命中)优先
+        # 嵌入空间 2D 投影（供前端散点图；无知识库时为 None）
+        viz = None
+        if emb_vec:
+            try:
+                from viz_pca import build_viz
+                viz = build_viz(emb_vec)
+            except Exception:
+                viz = None
         _json({
             "label": label,
             "confidence": round(conf, 4),
@@ -281,7 +311,9 @@ class GuardianHandler(BaseHTTPRequestHandler):
                               "malware": round(probs["malware"], 4)},
             "fused_state": fused,
             "monitor": mon,
+            "signature": sig,
             "embedding": emb_vec,
+            "viz": viz,
         }, self)
 
     def _explain(self):
@@ -306,6 +338,7 @@ class GuardianHandler(BaseHTTPRequestHandler):
                   status=400)
             return
         message = payload.get("message")
+        chat_history = payload.get("chat_history") or []
         detection = payload.get("detection_context") or {}
         if not detection:
             detection = {"fused_state": "未知", "probabilities": {},
@@ -313,7 +346,19 @@ class GuardianHandler(BaseHTTPRequestHandler):
         # 数据驱动：若未携带嵌入，则复用最近一次 predict 的嵌入做知识库检索
         if not detection.get("embedding") and _ServerState.last_embedding:
             detection["embedding"] = _ServerState.last_embedding
-        _json(explain(detection, message), self)
+        result = explain(detection, message, chat_history=chat_history)
+        # 附加与历史样本最相似的最近邻（供前端展示"像谁"）
+        try:
+            if detection.get("embedding"):
+                from models import knowledge as KB
+                kb = KB.load_knowledge()
+                if kb:
+                    hits = KB.retrieve(detection["embedding"], kb, k=3)
+                    if hits:
+                        result["top_matches"] = hits["matches"]
+        except Exception:
+            pass
+        _json(result, self)
 
     def _read_multipart(self, length):
         """粗解析 multipart/form-data，返回第一个 file 字段的二进制内容。"""

@@ -51,10 +51,11 @@ export function fetchMonitor() {
 }
 
 // 自研本地解释引擎：生成结论/依据/建议，或回答追问
-export async function explain(message, detectionContext) {
+export async function explain(message, detectionContext, history) {
   const body = {}
   if (message) body.message = message
   if (detectionContext) body.detection_context = detectionContext
+  if (Array.isArray(history) && history.length) body.chat_history = history
   return fetchJSON('/explain', {
     method: 'POST',
     headers: authHeaders({ 'Content-Type': 'application/json' }),

@@ -160,7 +160,16 @@ def analyze(detection, embedding=None):
         for f in tops:
             lines.append(f"  · [{f.get('area')}] {f.get('desc')}（规则：{f.get('rule')}）")
 
-    # 3) 数据驱动：特征知识库最近邻（经验依据）
+    # 3) 特征签名依据（MD5 哈希库 + 字节签名库）
+    sig = detection.get("signature") or {}
+    if sig.get("malicious"):
+        from sigscan import describe as sig_desc
+        ev_sig = sig_desc(sig)
+        evidence.append(("特征签名", ev_sig))
+        lines.append(f"特征签名检测：{ev_sig}")
+        reasoning_chain.append(("特征签名", "命中"))
+
+    # 4) 数据驱动：特征知识库最近邻（经验依据）
     hits = _nearest_examples(embedding) if embedding is not None else None
     if hits and hits.get("matches"):
         top = hits["matches"][:3]
@@ -206,15 +215,26 @@ def _match_intent(question):
         return "risk"
     if re.search(r"结论|结果|判断|判定|摘要|是什么|总结", q):
         return "summary"
+    # 确认/赞同类短句（如"好""好的""明白""知道了"）→ 衔接上文回应
+    if re.fullmatch(r"(好的?|好滴|嗯|嗯嗯|哦|明白了|知道(了)?|了解|收到|行|可以|没问题|对|没错|好的吧|ok|OK)[。！!~～.…]*", q):
+        return "ack"
     return "default"
 
 
-def ask(question, detection, embedding=None):
-    """根据用户问题与检测上下文，返回一段自然语言回答文本。"""
-    a = analyze(detection, embedding=embedding)
+def ask(question, detection, embedding=None, a=None, chat_history=None):
+    """根据用户问题与检测上下文，返回一段自然语言回答文本。
+    a 为可选的已计算 analyze 结果，避免重复计算。
+    chat_history 为 [{role: 'user'|'ai', text}, ...]，用于衔接上一条 AI 回复。"""
+    if a is None:
+        a = analyze(detection, embedding=embedding)
     intent = _match_intent(question)
     state = a["fused_state"]
 
+    if intent == "ack":
+        prev = next((m.get("text") for m in (chat_history or [])
+                     if m.get("role") == "ai" and m.get("text")), "")
+        return (f"好的。{('已按上面的说明处理。' if prev else '分析结论已给出。')}"
+                "如还有样本需要检测或其他问题，随时告诉我。")
     if intent == "advice":
         body = "\n".join(f"{i}. {t}" for i, t in enumerate(a["advice"], 1))
         return f"{a['summary']}\n\n处置建议：\n{body}"
@@ -238,13 +258,17 @@ def ask(question, detection, embedding=None):
 
 # ============ 便捷入口 ============
 
-def explain(detection, question=None, embedding=None):
+def explain(detection, question=None, embedding=None, chat_history=None):
     """对外统一入口：question 为空 → 返回 analyze()；否则 → ask()。
+    无论是否有问题，都附带完整 analysis，供前端分块卡片渲染。
+    chat_history 透传给 ask 用于衔接上文。
     若 detection 本身携带 embedding 字段，则自动透传给知识库检索。"""
     if embedding is None:
         embedding = (detection or {}).get("embedding")
-    if question and question.strip():
-        return {"ok": True, "fused_state": analyze(detection, embedding)["fused_state"],
-                "reply": ask(question, detection, embedding=embedding)}
     a = analyze(detection, embedding)
+    if question and question.strip():
+        return {"ok": True, "fused_state": a["fused_state"],
+                "reply": ask(question, detection, embedding=embedding, a=a,
+                             chat_history=chat_history),
+                "analysis": a}
     return {"ok": True, **a}

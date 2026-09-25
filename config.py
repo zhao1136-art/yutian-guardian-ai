@@ -80,7 +80,8 @@ OOD_COV_REG = 1e-3
 API_HOST = "0.0.0.0"
 API_PORT = 8567
 # API 鉴权 token：为空则自动生成并存 monitor_data/api_token.txt；可被环境变量 GUARDIAN_API_TOKEN 覆盖
-API_MAX_UPLOAD = 10 * 1024 * 1024
+# 公用 API 上传上限：真实恶意样本（加壳/打包）常超过 10MB，放宽到 200MB
+API_MAX_UPLOAD = 200 * 1024 * 1024
 # 前端控制台静态产物目录（React 构建输出，由本服务同端口托管）
 STATIC_WEB = os.path.join(BASE_DIR, "static_web")
 
@@ -116,6 +117,13 @@ RULE_WEIGHTS = {
     "proc_susp_name": 35,
     "proc_high_ws": 15,
 }
+
+# ============ 特征签名库（本地检测用） ============
+SIG_DIR = os.path.join(BASE_DIR, ".trae")
+# 恶意文件 MD5 特征库（每行一个 32 位十六进制）
+SIG_MD5_FILE = os.path.join(SIG_DIR, "扫描-病毒特征库20260419.txt")
+# 字节签名库（offset,hexbytes,label）
+SIG_VIRUS_DAT = os.path.join(SIG_DIR, "virus.dat")
 
 # ============ 自动建目录 ============
 for _d in [SAMPLES_DIR, MALWARE_DIR, BENIGN_DIR, IMAGE_CACHE_DIR,
