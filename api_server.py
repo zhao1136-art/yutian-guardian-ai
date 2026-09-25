@@ -56,6 +56,8 @@ class _ServerState:
     img_size = IMG_SIZE
     ood_stats = None
     started_at = time.time()
+    # 最近一次检测的 CNN 嵌入，供 /explain 知识库检索复用
+    last_embedding = None
 
 
 def _load_runtime():
@@ -260,6 +262,14 @@ class GuardianHandler(BaseHTTPRequestHandler):
             conf_threshold=OOD_CONF_THRESHOLD,
         )
 
+        # 提取 CNN 嵌入（256维），供特征知识库最近邻检索
+        try:
+            with torch.no_grad():
+                emb_vec = _ServerState.model.embed(tensor.unsqueeze(0)).squeeze(0).tolist()
+            _ServerState.last_embedding = emb_vec
+        except Exception:
+            emb_vec = None
+
         # 监控融合
         mon = _monitor_payload()
         from guardian import fuse
@@ -271,6 +281,7 @@ class GuardianHandler(BaseHTTPRequestHandler):
                               "malware": round(probs["malware"], 4)},
             "fused_state": fused,
             "monitor": mon,
+            "embedding": emb_vec,
         }, self)
 
     def _explain(self):
@@ -299,6 +310,9 @@ class GuardianHandler(BaseHTTPRequestHandler):
         if not detection:
             detection = {"fused_state": "未知", "probabilities": {},
                          "monitor": {"risk_score": 0, "findings": []}}
+        # 数据驱动：若未携带嵌入，则复用最近一次 predict 的嵌入做知识库检索
+        if not detection.get("embedding") and _ServerState.last_embedding:
+            detection["embedding"] = _ServerState.last_embedding
         _json(explain(detection, message), self)
 
     def _read_multipart(self, length):

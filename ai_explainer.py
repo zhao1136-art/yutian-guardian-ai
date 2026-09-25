@@ -1,9 +1,11 @@
 """
 御天防护型 AI — 自研本地解释引擎（无外部大模型）
-根据检测数据（四态融合 + 置信度 + 概率 + 监控风险项）生成可控、可解释的
-自然语言结论 / 依据 / 处置建议，并以关键字意图识别回答用户的常见追问。
+根据检测数据（四态融合 + 置信度 + 概率 + 监控风险项 + 特征知识库最近邻）
+生成可控、可解释的自然语言结论 / 依据 / 处置建议，
+并以关键字意图识别回答用户的常见追问。
 
-纯本地离线，不联网、无需 API Key。
+数据驱动升级：可注入 CNN 嵌入(256维)，在特征知识库中检索最相似的历史训练样本，
+作为“经验依据”并在回答中给出推理链。纯本地离线，不联网、无需 API Key。
 """
 import re
 
@@ -88,16 +90,39 @@ def _hint_for_score(score):
     return f"风险分 {s}：{_SCORE_HINT[0]}"
 
 
+# ============ 数据驱动知识库 ============
+# 惰性加载：首次需要时读一次特征知识库，做最近邻检索生成“经验依据”。
+
+def _nearest_examples(embedding, k=3):
+    """
+    对指定 CNN 嵌入(256维)做特征知识库最近邻检索。
+    返回结构化命中 dict 或 None（无嵌入/无库时）。
+    命中结构: {"matches":[{rank,label,label_name,file,sha,score}],
+               "by_label":{label:{best_score,label_name}}}
+    """
+    if not embedding:
+        return None
+    try:
+        from models import knowledge
+        kb = knowledge.load_knowledge()
+        if not kb:
+            return None
+        return knowledge.retrieve(embedding, kb, k=k)
+    except Exception:
+        return None
+
+
 # ============ 核心分析 ============
 
-def analyze(detection):
+def analyze(detection, embedding=None):
     """
     输入 _predict 返回的检测 payload，生成结构化解释。
     detection 关键字段：
       fused_state, label, confidence, probabilities{benign,malware},
       monitor{risk_score, monitor_verdict, findings:[{area,desc,rule},...]}
+    embedding：可选的 256 维 CNN 嵌入，用于数据驱动最近邻检索。
     返回 {fused_state, severity, summary, rationale, evidence[], advice[],
-           score_hint, questions[]}
+           score_hint, questions[], reasoning_chain[]}
     """
     detection = detection or {}
     state = detection.get("fused_state") or detection.get("label") or "未知"
@@ -111,6 +136,7 @@ def analyze(detection):
 
     lines = []
     evidence = []
+    reasoning_chain = []
 
     # 1) 静态模型依据
     if probs.get("malware") is not None or probs.get("benign") is not None:
@@ -119,11 +145,13 @@ def analyze(detection):
               + (f"，模型置信度 {conf}" if conf is not None else ""))
         evidence.append(("静态分析", ev))
         lines.append(ev)
+        reasoning_chain.append(("静态模型", round(probs.get("malware") or 0, 4)))
 
     # 2) 监控依据
     if verdict:
         evidence.append(("系统监控", f"监控判定：{verdict}（风险分 {risk}/100）"))
         lines.append(f"系统监控侧判定为【{verdict}】，风险分 {risk}/100。")
+        reasoning_chain.append(("系统监控", verdict))
     if findings:
         tops = findings[:5]
         evidence.append(("命中风险项",
@@ -132,7 +160,20 @@ def analyze(detection):
         for f in tops:
             lines.append(f"  · [{f.get('area')}] {f.get('desc')}（规则：{f.get('rule')}）")
 
-    # 3) 汇总
+    # 3) 数据驱动：特征知识库最近邻（经验依据）
+    hits = _nearest_examples(embedding) if embedding is not None else None
+    if hits and hits.get("matches"):
+        top = hits["matches"][:3]
+        ev_exp = ("历史经验", "与特征知识库中最相近的 "
+                  + "、".join(f"「{m.get('file','?')}」({m['label_name']}, 相似度 {m['score']})"
+                             for m in top)
+                  + "，共匹配 "
+                  + str(len(hits['matches'])) + " 个候选。距离越近越像该历史样本。")
+        evidence.append(("历史经验", ev_exp[1]))
+        lines.append(f"特征知识库最近邻：{ev_exp[1]}")
+        reasoning_chain.append(("知识库最近邻", top))
+
+    # 4) 汇总
     summary = (f"{meta['head']}。"
                + (" ".join(lines[:1]) if lines else "当前未提供额外检测数据。"))
     if state in ("未知",):
@@ -147,6 +188,7 @@ def analyze(detection):
         "advice": meta["advice"],
         "score_hint": _hint_for_score(risk),
         "questions": ["为什么这么判定", "有哪些依据", "我该怎么办", "风险高吗"],
+        "reasoning_chain": reasoning_chain,
     }
 
 
@@ -167,9 +209,9 @@ def _match_intent(question):
     return "default"
 
 
-def ask(question, detection):
+def ask(question, detection, embedding=None):
     """根据用户问题与检测上下文，返回一段自然语言回答文本。"""
-    a = analyze(detection)
+    a = analyze(detection, embedding=embedding)
     intent = _match_intent(question)
     state = a["fused_state"]
 
@@ -177,7 +219,13 @@ def ask(question, detection):
         body = "\n".join(f"{i}. {t}" for i, t in enumerate(a["advice"], 1))
         return f"{a['summary']}\n\n处置建议：\n{body}"
     if intent == "why":
-        return f"判定为【{state}】的依据如下：\n{a['rationale']}"
+        base = f"判定为【{state}】的依据如下：\n{a['rationale']}"
+        if a.get("reasoning_chain"):
+            ks = [f"{k}: {v}" for k, v in a["reasoning_chain"]
+                  if not isinstance(v, list)]
+            if ks:
+                base += "\n\n推理链：" + " → ".join(ks)
+        return base
     if intent == "risk":
         return (f"该样本严重程度：{a['severity']}"
                 + (f"\n{a['score_hint']}" if a["score_hint"] else ""))
@@ -190,10 +238,13 @@ def ask(question, detection):
 
 # ============ 便捷入口 ============
 
-def explain(detection, question=None):
-    """对外统一入口：question 为空 → 返回 analyze()；否则 → ask()。"""
+def explain(detection, question=None, embedding=None):
+    """对外统一入口：question 为空 → 返回 analyze()；否则 → ask()。
+    若 detection 本身携带 embedding 字段，则自动透传给知识库检索。"""
+    if embedding is None:
+        embedding = (detection or {}).get("embedding")
     if question and question.strip():
-        return {"ok": True, "fused_state": analyze(detection)["fused_state"],
-                "reply": ask(question, detection)}
-    a = analyze(detection)
+        return {"ok": True, "fused_state": analyze(detection, embedding)["fused_state"],
+                "reply": ask(question, detection, embedding=embedding)}
+    a = analyze(detection, embedding)
     return {"ok": True, **a}

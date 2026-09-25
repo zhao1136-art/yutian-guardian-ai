@@ -1,5 +1,6 @@
 # —— 敏感 / 本地数据：绝不入库 ——
 monitor_data/
+checkpoints/
 *.pth
 *.npz
 

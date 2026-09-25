@@ -38,7 +38,7 @@ LR_PATIENCE = 3       # 验证指标不再下降多少 epoch 后降低学习率
 LR_FACTOR = 0.5        # 学习率衰减系数
 EARLY_STOP_PATIENCE = 8  # 验证指标连续不提升多少 epoch 后提前停止（0 = 关闭）
 # 每类最大样本数（防止服务器磁盘爆满，0=不限制）
-MAX_SAMPLES_PER_CLASS = 800
+MAX_SAMPLES_PER_CLASS = 1600
 
 # ============ 样本过滤 ============
 # 只处理这些扩展名
