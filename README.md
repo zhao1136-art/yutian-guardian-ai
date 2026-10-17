@@ -1,4 +1,47 @@
-# 御天防护型 AI (Guardian AI)
+<div align="center">
+
+# 御天防护型 AI · Guardian AI
+
+**不靠特征库猜，直接把二进制"看"成图 —— 再让 CNN 判断它像不像恶意软件。**
+
+[![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)](#)
+[![Model](https://img.shields.io/badge/model-Malware--to--Image%20%2B%20CNN-EE4C2C?logo=pytorch&logoColor=white)](#)
+[![OOD](https://img.shields.io/badge/OOD-%E5%9B%9B%E6%80%81%E8%9E%8D%E5%90%88%E5%88%A4%E5%AE%9A-8957E5)](#)
+[![API](https://img.shields.io/badge/API-REST%20%2B%20Bearer%20token-009688)](#)
+[![Offline](https://img.shields.io/badge/%E7%A6%BB%E7%BA%BF-%E5%8F%AF%E5%AE%8C%E5%85%A8%E6%9C%AC%E5%9C%B0%E8%BF%90%E8%A1%8C-2ea44f)](#)
+
+</div>
+
+---
+
+## 一句话
+
+传统杀软靠「这个哈希见过 / 这段字节像某个家族」。这个分支换了个思路：
+**把 PE 文件按字节映射成 64×64 灰度图，交给轻量 CNN 做图像分类** ——
+恶意软件的二进制分布和正常程序在"视觉"上是不同的。
+
+加两个补丁：**OOD 未知检测**（识别训练分布之外的样本，不硬分类）
+和**系统监控层**（注册表自启动 / 启动文件夹 / 计划任务 / 进程内存采样），
+最终输出 **良性 / 可疑待审 / 恶意 / 未知** 四态。
+
+> 四态里的「未知」是刻意留的 —— 模型没见过的东西，硬说它是良性或恶意都是在骗人。
+
+## 怎么用
+
+```bash
+pip install -r requirements.txt
+python api_server.py            # 起 REST API
+python guardian.py <文件路径>    # 单文件四态判定
+python infer.py --dir <目录>     # 批量扫描
+python train.py                 # 训练
+python viz_pca.py               # 生成前端用的 PCA 2D 散点数据
+```
+
+公共接口：`/health` `/monitor` `/predict` `/explain`（Bearer token 鉴权，局域网可用）。
+
+---
+
+## 详细说明
 
 基于「二进制 → 灰度图 + 轻量 CNN」的恶意程序检测引擎，并融合系统监控层，输出**四态融合判定**。适用于本地离线部署，附公共 REST API 供其他程序/设备接入。
 
