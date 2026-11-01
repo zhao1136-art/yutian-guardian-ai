@@ -228,3 +228,9 @@ npm run build        # 产物输出到 ../static_web，由 api_server 同端口�
 
 
 > 本项目为个人项目，按「现状」提供，不附带任何担保。
+
+---
+
+<div align="center">
+<sub>个人项目 · <a href="LICENSE">PolyForm Noncommercial License 1.0.0</a> · 禁止商业使用</sub>
+</div>
